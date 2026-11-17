@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jogo do Caminhão</title>
+<style>
+  /* Estilo da página (CSS): cores e posição */
+  body   { text-align: center; font-family: sans-serif; background: #222; color: white; }
+  canvas { border: 3px solid white; touch-action: none; max-width: 100%; }
+</style>
+</head>
+<body>
+
+<h1>📦 Pega-Carga com o Claudio</h1>
+<canvas id="tela" width="900" height="500"></canvas>
+<p>Use as setas ← → ou arraste o mouse/dedo. Pegue as caixas e fuja das bombas! Enter reinicia.</p>
+
+<script>
+// ---------- 1. PREPARAÇÃO ----------
+var tela = document.getElementById("tela");   // a "folha de desenho" da página
+var desenho = tela.getContext("2d");          // o "pincel" que usamos para desenhar
+
+// ---------- 2. VARIÁVEIS (guardam informações do jogo) ----------
+var pontos = 0;
+var vidas = 3;
+var fimDeJogo = false;
+var velocidade = 2.5;   // velocidade base de queda
+var rolagem = 0;        // quanto o cenário já andou (faz a paisagem se mover)
+var cargas = [];        // LISTA com tudo que está caindo (caixas e bombas)
+var espera = 0;         // contagem regressiva até o próximo objeto aparecer
+
+// O caminhão: posição, tamanho total e tamanho da carroceria (onde a caixa cai)
+// (agora é o Claudio: 32 pixels x 3 = 96 de largura; os pés tocam o chão em y = 480)
+var caminhao = { x: 400, y: 384, largura: 96, carroceria: 96 };
+var direcao = 1;        // 1 = olhando para a direita, -1 = para a esquerda
+
+// Guarda quais setas estão apertadas
+var teclas = { esquerda: false, direita: false };
+
+// ---------- 3. FERRAMENTAS DE DESENHO (formas simples) ----------
+
+// Retângulo: posição (x, y), largura, altura e cor
+function retangulo(x, y, larg, alt, cor) {
+  desenho.fillStyle = cor;
+  desenho.fillRect(x, y, larg, alt);
+}
+
+// Círculo: centro (x, y), raio e cor
+function circulo(x, y, raio, cor) {
+  desenho.fillStyle = cor;
+  desenho.beginPath();
+  desenho.arc(x, y, raio, 0, Math.PI * 2);
+  desenho.fill();
+}
+
+// Elipse (círculo achatado): centro (x, y), raios (largura e altura) e cor
+function elipse(x, y, rx, ry, cor) {
+  desenho.fillStyle = cor;
+  desenho.beginPath();
+  desenho.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+  desenho.fill();
+}
+
+// Forma ligando vários pontos: [[x1,y1],[x2,y2],...]
+function poligono(pontos, cor) {
+  desenho.fillStyle = cor;
+  desenho.beginPath();
+  desenho.moveTo(pontos[0][0], pontos[0][1]);
+  for (var i = 1; i < pontos.length; i++) {
+    desenho.lineTo(pontos[i][0], pontos[i][1]);
+  }
+  desenho.fill();
+}
+
+// ---------- 4. O CENÁRIO (paisagem em movimento) ----------
+
+// Truque da paisagem: desenhamos a camada DUAS vezes, lado a lado.
+// Conforme "rolagem" aumenta, a camada anda para a esquerda; quando a
+// 1ª cópia sai da tela, a 2ª já está no lugar dela, e o ciclo recomeça.
+// Camadas distantes andam devagar, camadas próximas andam rápido (efeito 3D!).
+function desenharCamada(velocidadeDaCamada, desenhaCamada) {
+  var deslocamento = (rolagem * velocidadeDaCamada) % 900;
+  desenho.save();
+  desenho.translate(-deslocamento, 0);
+  desenhaCamada();            // 1ª cópia
+  desenho.translate(900, 0);
+  desenhaCamada();            // 2ª cópia, logo ao lado
+  desenho.restore();
+}
+
+// Camada 1: nuvens
+function nuvens() {
+  var posicoes = [[120, 70], [430, 110], [740, 60]];
+  for (var i = 0; i < posicoes.length; i++) {
+    var x = posicoes[i][0], y = posicoes[i][1];
+    elipse(x, y, 50, 22, "white");
+    elipse(x + 35, y - 12, 35, 22, "white");
+    elipse(x - 35, y - 5, 30, 18, "white");
+  }
+}
+
+// Uma montanha: de x1 até x2, com o pico na altura "topo"
+function montanha(x1, x2, topo, cor) {
+  desenho.fillStyle = cor;
+  desenho.beginPath();
+  desenho.moveTo(x1, 330);
+  desenho.quadraticCurveTo((x1 + x2) / 2, 2 * topo - 330, x2, 330);  // curva suave
+  desenho.fill();
+}
+
+// Camada 2: montanhas ao fundo
+function montanhas() {
+  montanha(40, 400, 170, "#a8dcc6");
+  montanha(330, 700, 200, "#b8e4d2");
+  montanha(620, 880, 240, "#9fd6bf");
+}
+
+// Uma árvore: x = posição, y = chão, e = escala (tamanho)
+function arvore(x, y, e) {
+  desenho.save();
+  desenho.translate(x, y);
+  desenho.scale(e, e);
+  retangulo(-7, -80, 14, 80, "#6b3f1f");   // tronco
+  elipse(25, -125, 45, 28, "#5b7a3a");     // folhas escuras (atrás)
+  elipse(-40, -105, 42, 24, "#8aa84a");    // folhas do meio
+  elipse(40, -105, 42, 24, "#8aa84a");
+  elipse(0, -135, 52, 30, "#a6c84a");      // folhas claras
+  elipse(-15, -165, 38, 22, "#9cc040");
+  desenho.restore();
+}
+
+// Camada 3: árvores
+function arvores() {
+  arvore(100, 372, 0.9);
+  arvore(330, 372, 1.1);
+  arvore(580, 372, 1.0);
+  arvore(800, 372, 0.8);
+}
+
+// Camada 4: cerca branca (um poste a cada 45 pixels)
+function cerca() {
+  retangulo(0, 368, 900, 4, "#f0f0f0");
+  retangulo(0, 380, 900, 4, "#f0f0f0");
+  for (var x = 0; x < 900; x += 45) {
+    retangulo(x, 360, 5, 28, "#e6e6e6");
+    retangulo(x, 360, 5, 5, "#f5b82e");
+  }
+}
+
+// Camada 5: faixas amarelas da pista (a mais rápida)
+function faixas() {
+  for (var x = 0; x < 900; x += 100) {
+    retangulo(x, 447, 60, 5, "#f5b82e");
+  }
+}
+
+// Monta o cenário inteiro, de trás para frente
+function desenharCenario() {
+  // Céu em degradê (azul forte em cima, claro perto do horizonte)
+  var ceu = desenho.createLinearGradient(0, 0, 0, 330);
+  ceu.addColorStop(0, "#4ac6ea");
+  ceu.addColorStop(1, "#cdeefa");
+  desenho.fillStyle = ceu;
+  desenho.fillRect(0, 0, 900, 330);
+
+  desenharCamada(0.2, nuvens);        // muito longe: bem devagar
+  desenharCamada(0.5, montanhas);
+
+  retangulo(0, 330, 900, 65, "#88a84c");   // gramado
+
+  desenharCamada(1.5, arvores);
+  desenharCamada(3, cerca);           // perto: mais rápido
+
+  retangulo(0, 388, 900, 7, "#bbbbbb");    // calçada
+  retangulo(0, 395, 900, 105, "#3a3a3f");  // asfalto
+  retangulo(0, 490, 900, 4, "white");      // linha branca da pista
+  desenharCamada(6, faixas);          // o chão passa bem rápido
+}
+
+// ---------- 5A. O PERSONAGEM CLAUDIO (pixel art 32x32) ----------
+// Cada letra é um quadradinho (pixel) colorido. O ponto "." é vazio (transparente).
+var paleta = {
+  O: "#ff7a00",   // laranja (boné e botas)
+  o: "#d45500",   // laranja escuro (aba do boné)
+  Y: "#d4f23a",   // amarelo-limão (colete)
+  N: "#0f2557",   // azul-marinho (roupa, calça, solado)
+  S: "#f2b27a",   // pele
+  W: "#ffffff"    // branco (olhos, faixas refletivas, prancheta)
+};
+
+// Parte de cima do corpo (linhas 0 a 21): igual nos dois quadros
+var personagemCorpo = [
+  "................................", //  0
+  "................................", //  1
+  "...........OOOOOOOO.............", //  2  boné grande
+  ".........OOOOOOOOOOOO...........", //  3
+  "........OOOOOOOYYOOOOO..........", //  4  logo amarelo no boné
+  "........OOOOOOOYYOOOOO..........", //  5
+  "........OOOOOOOOOOOOOOOOOOOOOO..", //  6  aba do boné
+  "........oooooooooooooooooooooo..", //  7
+  ".........SSSSSSNNSNNS...........", //  8  sobrancelhas
+  "........SSSSSSSWNSWNS...........", //  9  olhos
+  "........SSSSSSSSSSSSS...........", // 10
+  ".........SSSSSSNWWNSS...........", // 11  sorriso brincalhão
+  "..........SSSSSSSSSS............", // 12
+  "............SSSSS...............", // 13  pescoço
+  ".......NNNYYYYNNYYYYNNN.........", // 14  colete amarelo
+  ".......NNNYYWYYYYWYYNNN.NNN.....", // 15  faixas refletivas + prancheta
+  ".......NNNYYWYYYYWYYNNNNWWWN....", // 16
+  ".......NNNYYWYYYYWYYNNNNWNWN....", // 17
+  ".......NNNYYWYYYYWYYNNNNWWWN....", // 18
+  ".......SSSYYWYYYYWYYSSSNWNWN....", // 19  mãos
+  "..........YYYYYYYYYY...NNNNN....", // 20
+  "..........NNNNYYNNNN............"  // 21  cinto
+];
+
+// Pernas: quadro 0 (passo aberto) e quadro 1 (pernas juntas)
+var pernas = [
+  [
+    "..........NNNNNNNNNN............", // 22
+    ".........NNNNN..NNNNN...........", // 23
+    "........NNNNN....NNNNN..........", // 24
+    ".......NNNNN......NNNNN.........", // 25
+    "......NNNNN........NNNNN........", // 26
+    "......NNNNN........NNNNN........", // 27
+    "......NNNNN........NNNNN........", // 28
+    "......OOOOOOO......OOOOOOO......", // 29  botas
+    "......OOOOOOO......OOOOOOO......", // 30
+    "......NNNNNNN......NNNNNNN......"  // 31  solado
+  ],
+  [
+    "..........NNNNNNNNNN............", // 22
+    "..........NNNN.NNNNN............", // 23
+    "..........NNNN.NNNNN............", // 24
+    "..........NNNN.NNNNN............", // 25
+    "..........NNNN.NNNNN............", // 26
+    "..........NNNN.NNNNN............", // 27
+    "..........NNNN.NNNNN............", // 28
+    ".........OOOOO.OOOOOOO..........", // 29  botas
+    ".........OOOOO.OOOOOOO..........", // 30
+    ".........NNNNN.NNNNNNN.........."  // 31  solado
+  ]
+];
+
+// Desenha o Claudio com o canto de cima à esquerda em (x, y)
+function desenharPersonagem(x, y) {
+  var quadro = Math.floor(rolagem / 8) % 2;           // alterna 0, 1, 0, 1... (anima o andar)
+  var linhas = personagemCorpo.concat(pernas[quadro]); // junta o corpo com as pernas do quadro
+  var pixel = 3;                                       // cada quadradinho vira 3x3 na tela
+  var salto = (quadro === 1) ? -pixel : 0;             // no quadro 1 ele sobe um pouquinho (passo)
+
+  desenho.save();
+  desenho.translate(x, y + salto);
+  if (direcao === -1) {                                // andando para a esquerda: espelha o desenho
+    desenho.translate(32 * pixel, 0);
+    desenho.scale(-1, 1);
+  }
+  for (var l = 0; l < linhas.length; l++) {            // para cada linha...
+    for (var c = 0; c < 32; c++) {                     // ...e cada coluna
+      var letra = linhas[l][c];
+      if (letra !== ".") {
+        retangulo(c * pixel, l * pixel, pixel, pixel, paleta[letra]);
+      }
+    }
+  }
+  desenho.restore();
+}
+
+// ---------- 5B. DESENHANDO O CAMINHÃO (não usado agora), A CAIXA, A BOMBA E O CORAÇÃO ----------
+
+function desenharCaminhao() {
+  var e = caminhao.largura / 1700;   // "escala": encolhe o desenho grande para o tamanho do jogo
+  desenho.save();
+  desenho.translate(caminhao.x - 110 * e, caminhao.y - 160 * e);
+  desenho.scale(e, e);
+
+  // Chassi (a base escura) e a peça que liga a cabine à carroceria
+  retangulo(195, 560, 1185, 55, "#0a2a66");
+  retangulo(155, 562, 1260, 20, "#0a2a66");
+  retangulo(1380, 470, 70, 145, "#dde2ea");
+
+  // Carroceria (o contêiner cinza com borda azul)
+  retangulo(115, 162, 1300, 396, "#dde2ea");
+  desenho.strokeStyle = "#9aa8c4";
+  desenho.lineWidth = 3;
+  for (var x = 135; x < 1410; x += 21) {       // repete: uma listra a cada 21 pixels
+    desenho.beginPath();
+    desenho.moveTo(x, 170);
+    desenho.lineTo(x, 550);
+    desenho.stroke();
+  }
+  desenho.strokeStyle = "#2a6df4";
+  desenho.lineWidth = 8;
+  desenho.strokeRect(115, 162, 1300, 396);
+
+  // Cabine azul, teto amarelo, janelas e para-choque amarelo
+  poligono([[1445,160],[1680,160],[1715,190],[1790,270],[1810,400],[1810,640],[1445,640]], "#1f7bf2");
+  retangulo(1445, 160, 260, 30, "#fdc04e");
+  retangulo(1505, 238, 200, 147, "#04295e");
+  poligono([[1705,238],[1760,238],[1810,330],[1810,400],[1705,400]], "#04295e");
+  retangulo(1445, 545, 365, 95, "#fdc04e");
+  retangulo(635, 567, 208, 75, "#fdc04e");
+
+  // Rodas: uma lista de posições e um "for" que desenha todas
+  var rodas = [278, 433, 1123, 1278, 1628];
+  for (var i = 0; i < rodas.length; i++) {
+    circulo(rodas[i], 648, 77, "#0a2a66");     // pneu
+    circulo(rodas[i], 648, 52, "#dde2ea");     // calota
+  }
+
+  desenho.restore();
+}
+
+// Desenha uma caixa de papelão (c = o objeto da lista "cargas")
+function desenharCaixa(c) {
+  var e = c.tamanho / 740;
+  desenho.save();
+  desenho.translate(c.x, c.y);
+  desenho.scale(e, e);
+
+  poligono([[12,130],[350,275],[350,655],[12,515]], "#cd9565");    // lado esquerdo
+  poligono([[350,275],[728,145],[728,525],[350,655]], "#ba8558");  // lado direito
+  poligono([[12,130],[400,12],[728,145],[350,275]], "#dfaa78");    // topo
+  poligono([[118,178],[480,52],[600,95],[235,225]], "#f3deb4");    // fita adesiva
+  poligono([[118,178],[235,225],[235,405],[118,350]], "#dcb48a");  // ponta da fita
+
+  desenho.restore();
+}
+
+// Desenha uma bomba (bola preta com pavio e faísca)
+function desenharBomba(c) {
+  var raio = c.tamanho * 0.4;
+  var cx = c.x + c.tamanho / 2;
+  var cy = c.y + c.tamanho * 0.6;
+
+  circulo(cx, cy, raio, "#222");                                   // corpo
+  circulo(cx - raio * 0.4, cy - raio * 0.4, raio * 0.2, "#777");   // brilho
+
+  desenho.strokeStyle = "saddlebrown";                             // pavio
+  desenho.lineWidth = 3;
+  desenho.beginPath();
+  desenho.moveTo(cx + raio * 0.5, cy - raio * 0.8);
+  desenho.lineTo(cx + raio * 0.9, cy - raio * 1.4);
+  desenho.stroke();
+
+  circulo(cx + raio * 0.9, cy - raio * 1.4, 4, "orange");          // faísca
+}
+
+// Desenha um coração: centro em x, topo em y, tam = tamanho
+function desenharCoracao(x, y, tam, cor) {
+  desenho.fillStyle = cor;
+  desenho.beginPath();
+  desenho.moveTo(x, y + tam * 0.3);
+  desenho.bezierCurveTo(x, y, x - tam * 0.5, y, x - tam * 0.5, y + tam * 0.3);
+  desenho.bezierCurveTo(x - tam * 0.5, y + tam * 0.6, x, y + tam * 0.8, x, y + tam);
+  desenho.bezierCurveTo(x, y + tam * 0.8, x + tam * 0.5, y + tam * 0.6, x + tam * 0.5, y + tam * 0.3);
+  desenho.bezierCurveTo(x + tam * 0.5, y, x, y, x, y + tam * 0.3);
+  desenho.fill();
+}
+
+// ---------- 6. LÓGICA DO JOGO ----------
+
+// Cria UM objeto novo (caixa ou bomba) acima da tela, em lugar sorteado
+function novaCarga() {
+  return {
+    x: Math.random() * (tela.width - 40),   // posição sorteada
+    y: -40,                                 // começa logo acima da tela
+    tamanho: 40,
+    vel: velocidade + Math.random(),        // cada um cai com uma velocidade
+    bomba: Math.random() < 0.25             // 25% de chance de ser bomba
+  };
+}
+
+// Reinicia tudo para começar um jogo novo
+function reiniciar() {
+  pontos = 0;
+  vidas = 3;
+  velocidade = 2.5;
+  cargas = [];
+  espera = 0;
+  fimDeJogo = false;
+}
+
+// Atualiza as posições
+function atualizar() {
+  if (fimDeJogo) return;
+
+  rolagem += velocidade / 2.5;   // o cenário anda (mais rápido quando o jogo acelera)
+
+  // Move o caminhão com as setas
+  if (teclas.esquerda) { caminhao.x -= 7; direcao = -1; }
+  if (teclas.direita)  { caminhao.x += 7; direcao = 1; }
+
+  // Não deixa o caminhão sair da tela
+  if (caminhao.x < 0) caminhao.x = 0;
+  if (caminhao.x > tela.width - caminhao.largura) caminhao.x = tela.width - caminhao.largura;
+
+  // A velocidade aumenta a cada 10 pontos: 2.5, 3.5, 4.5...
+  var dezenas = Math.floor(pontos / 10);        // quantas vezes já passou de 10 pontos
+  velocidade = 2.5 + dezenas * 1;               // soma 1 de velocidade para cada 10 pontos
+
+  // Sempre 3 objetos caindo ao mesmo tempo
+  var maximo = 3;
+  // Um novo objeto só entra quando o "relógio" (espera) chega a zero.
+  // Assim eles caem em tempos diferentes, com espaço entre um e outro.
+  espera--;
+  if (espera <= 0 && cargas.length < maximo) {
+    cargas.push(novaCarga());
+    espera = (150 + Math.random() * 150) / velocidade;   // tempo sorteado (mais curto quando está mais rápido)
+  }
+
+  // Passa por TODOS os objetos da lista (de trás para frente, para poder remover)
+  for (var i = cargas.length - 1; i >= 0; i--) {
+    var c = cargas[i];
+    c.y += c.vel;   // cai
+
+    // Tocou na carroceria? (compara altura e largura)
+    var tocouNaAltura  = c.y + c.tamanho >= caminhao.y;
+    var tocouNaLargura = c.x + c.tamanho > caminhao.x &&
+                         c.x < caminhao.x + caminhao.carroceria;
+
+    if (tocouNaAltura && tocouNaLargura) {
+      if (c.bomba) {
+        vidas--;                  // pegou uma bomba: perde uma vida!
+      } else {
+        pontos++;                 // pegou uma caixa: ganha ponto
+      }
+      cargas.splice(i, 1);        // remove da lista
+    }
+    // Chegou no chão sem ser pego?
+    else if (c.y > 480) {
+      if (!c.bomba) vidas--;      // deixar a caixa cair custa uma vida (deixar a bomba cair é bom!)
+      cargas.splice(i, 1);
+    }
+  }
+
+  if (vidas <= 0) fimDeJogo = true;
+}
+
+// Desenha tudo na tela
+function desenhar() {
+  desenharCenario();
+  desenharPersonagem(caminhao.x, caminhao.y);
+
+  // Desenha cada objeto da lista: bomba ou caixa
+  for (var i = 0; i < cargas.length; i++) {
+    if (cargas[i].bomba) desenharBomba(cargas[i]);
+    else desenharCaixa(cargas[i]);
+  }
+
+  // Placar
+  desenho.fillStyle = "#073b4c";
+  desenho.font = "22px sans-serif";
+  desenho.fillText("Pontos: " + pontos, 15, 30);
+
+  // 3 corações: vermelhos = vidas que restam, cinza = vidas perdidas
+  for (var j = 0; j < 3; j++) {
+    var cor = (j < vidas) ? "red" : "#999";
+    desenharCoracao(790 + j * 32, 10, 24, cor);
+  }
+
+  if (fimDeJogo) {
+    desenho.textAlign = "center";
+    desenho.font = "48px sans-serif";
+    desenho.fillText("Fim de jogo!", 450, 220);
+    desenho.font = "22px sans-serif";
+    desenho.fillText("Aperte Enter (ou toque na tela) para jogar de novo", 450, 265);
+    desenho.textAlign = "left";
+  }
+}
+
+// O "coração" do jogo: roda de novo e de novo, uns 60 vezes por segundo
+function repetir() {
+  atualizar();
+  desenhar();
+  requestAnimationFrame(repetir);
+}
+
+// ---------- 7. CONTROLES (o jogo "escuta" o jogador) ----------
+document.addEventListener("keydown", function (e) {
+  if (e.key === "ArrowLeft")  teclas.esquerda = true;
+  if (e.key === "ArrowRight") teclas.direita = true;
+  if (e.key === "Enter" && fimDeJogo) reiniciar();
+});
+
+document.addEventListener("keyup", function (e) {
+  if (e.key === "ArrowLeft")  teclas.esquerda = false;
+  if (e.key === "ArrowRight") teclas.direita = false;
+});
+
+// Mouse ou dedo: o caminhão segue o ponteiro
+tela.addEventListener("pointermove", function (e) {
+  var area = tela.getBoundingClientRect();
+  var escala = tela.width / area.width;
+  var novoX = (e.clientX - area.left) * escala - caminhao.largura / 2;
+  if (novoX < caminhao.x) direcao = -1;       // foi para a esquerda
+  else if (novoX > caminhao.x) direcao = 1;   // foi para a direita
+  caminhao.x = novoX;
+});
+
+// Toque na tela depois do fim de jogo também reinicia
+tela.addEventListener("pointerdown", function () {
+  if (fimDeJogo) reiniciar();
+});
+
+// ---------- 8. COMEÇAR! ----------
+repetir();
+</script>
+
+</body>
+</html>
